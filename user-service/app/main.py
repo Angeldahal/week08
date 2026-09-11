@@ -1,3 +1,4 @@
+# week-08 CD demonstration.
 import logging
 import os
 import time
