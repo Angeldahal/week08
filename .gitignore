@@ -200,4 +200,4 @@ node_modules/
 
 terraform/.terraform/
 terraform/.terraform.lock.hcl
-terraform/
+terraform/terraform.tfstate
