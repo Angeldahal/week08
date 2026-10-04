@@ -1,6 +1,13 @@
 # Task 9.3C continuous deployment
 
-The combined `.github/workflows/01-ci.yml` checks pull requests to main. A main-branch push can promote one commit through image builds, staging, smoke checks and production, using job dependencies and the same commit SHA throughout.
+The pipeline is split into four workflows:
+
+1. `01-ci.yml` tests pull requests and main-branch pushes, then builds six SHA-tagged images on main.
+2. `02-deploy-staging.yml` runs after successful main-branch CI and deploys the tested images.
+3. `03-staging-test.yml` runs after successful staging deployment and checks the image SHA and served frontend.
+4. `04-deploy-production.yml` automatically deploys after successful staging tests.
+
+Each deployment workflow uses `workflow_run` with a success condition. CI records the tested commit in a `release-metadata` artifact; staging and staging tests forward that same artifact. Production therefore checks out and deploys the original tested commit, even if main changes while the chain runs. Pull request runs cannot trigger deployments.
 
 ## Local-only default
 
