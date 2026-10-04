@@ -1,0 +1,186 @@
+name: 04 - Deploy to Production
+
+'on':
+  workflow_run:
+    workflows:
+      - 03 - Test Staging
+    types:
+      - completed
+    branches:
+      - main
+
+permissions:
+  contents: read
+  actions: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: 04-deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+
+    environment:
+      name: production
+
+    steps:
+      - name: Download the successful upstream release
+        uses: actions/download-artifact@v4
+        with:
+          name: release-metadata
+          path: release
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Read tested image SHA
+        run: |
+          RELEASE_SHA=$(cat release/sha.txt)
+          [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          echo "RELEASE_SHA=$RELEASE_SHA" >> "$GITHUB_ENV"
+          echo "Tested release: $RELEASE_SHA"
+
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+
+      - name: Login to Azure
+        uses: azure/login@v3
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Get AKS credentials
+        run: |
+          az aks get-credentials \
+            --resource-group ${{ vars.AKS_RESOURCE_GROUP }} \
+            --name ${{ vars.AKS_CLUSTER_NAME }} \
+            --overwrite-existing
+
+      - name: Create production namespace
+        run: |
+          kubectl create namespace production \
+            --dry-run=client \
+            -o yaml | kubectl apply -f -
+
+      - name: Create PostgreSQL secret
+        run: |
+          kubectl create secret generic postgres-secret \
+            --namespace production \
+            --from-literal=POSTGRES_USER="${POSTGRES_USER}" \
+            --from-literal=POSTGRES_PASSWORD="${POSTGRES_PASSWORD}" \
+            --dry-run=client \
+            -o yaml | kubectl apply -f -
+        env:
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+
+      - name: Create application secret
+        run: |
+          AZURE_STORAGE_CONNECTION_STRING=$(az storage account show-connection-string --resource-group "$AKS_RESOURCE_GROUP" --name "$STORAGE_ACCOUNT_NAME" --query connectionString --output tsv)
+          echo "::add-mask::$AZURE_STORAGE_CONNECTION_STRING"
+          kubectl create secret generic application-secret \
+            --namespace production \
+            --from-literal=POSTGRES_USER="${POSTGRES_USER}" \
+            --from-literal=POSTGRES_PASSWORD="${POSTGRES_PASSWORD}" \
+            --from-literal=JWT_SECRET_KEY="${JWT_SECRET_KEY}" \
+            --from-literal=DEFAULT_ADMIN_USERNAME="${DEFAULT_ADMIN_USERNAME}" \
+            --from-literal=DEFAULT_ADMIN_EMAIL="${DEFAULT_ADMIN_EMAIL}" \
+            --from-literal=DEFAULT_ADMIN_PASSWORD="${DEFAULT_ADMIN_PASSWORD}" \
+            --from-literal=AZURE_STORAGE_CONNECTION_STRING="${AZURE_STORAGE_CONNECTION_STRING}" \
+            --dry-run=client \
+            -o yaml | kubectl apply -f -
+        env:
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          JWT_SECRET_KEY: ${{ secrets.JWT_SECRET_KEY }}
+          DEFAULT_ADMIN_USERNAME: ${{ secrets.DEFAULT_ADMIN_USERNAME }}
+          DEFAULT_ADMIN_EMAIL: ${{ secrets.DEFAULT_ADMIN_EMAIL }}
+          DEFAULT_ADMIN_PASSWORD: ${{ secrets.DEFAULT_ADMIN_PASSWORD }}
+          AKS_RESOURCE_GROUP: ${{ vars.AKS_RESOURCE_GROUP }}
+          STORAGE_ACCOUNT_NAME: ${{ vars.STORAGE_ACCOUNT_NAME }}
+
+      - name: Render and apply tested release
+        env:
+          DEPLOY_ENV: production
+          ACR_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+          RELEASE_SHA: ${{ env.RELEASE_SHA }}
+        run: |
+          python - <<'PY'
+          import os, pathlib, re
+          source = pathlib.Path('kubernetes') / os.environ['DEPLOY_ENV']
+          target = pathlib.Path('/tmp/rendered-manifests')
+          target.mkdir(exist_ok=True)
+          for path in source.glob('*.yaml'):
+              content = path.read_text()
+              if 'image: placeholder' in content:
+                  service = re.search(r'^  name: (.+)$', content, re.M).group(1).strip()
+                  content = content.replace('image: placeholder', 'image: ' + os.environ['ACR_SERVER'] + '/koalatech-' + service + ':' + os.environ['RELEASE_SHA'])
+              (target / path.name).write_text(content)
+          PY
+          kubectl apply -f /tmp/rendered-manifests/
+
+      - name: Wait for frontend rollout
+        run: |
+          kubectl rollout status deployment/frontend \
+            -n production \
+            --timeout=300s
+
+      - name: Wait for user-service rollout
+        run: |
+          kubectl rollout status deployment/user-service \
+            -n production \
+            --timeout=300s
+
+      - name: Wait for student-service rollout
+        run: |
+          kubectl rollout status deployment/student-service \
+            -n production \
+            --timeout=300s
+
+      - name: Wait for lecturer-service rollout
+        run: |
+          kubectl rollout status deployment/lecturer-service \
+            -n production \
+            --timeout=300s
+
+      - name: Wait for course-service rollout
+        run: |
+          kubectl rollout status deployment/course-service \
+            -n production \
+            --timeout=300s
+
+      - name: Wait for enrollment-service rollout
+        run: |
+          kubectl rollout status deployment/enrollment-service \
+            -n production \
+            --timeout=300s
+
+      - name: Show production resources
+        run: |
+          kubectl get pods -n production
+          kubectl get services -n production
+          kubectl get pvc -n production
+
+      - name: Verify production release
+        run: |
+          for i in {1..30}; do
+            IP=$(kubectl get service frontend -n production -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+            if [ -n "$IP" ]; then break; fi
+            sleep 10
+          done
+          test -n "$IP"
+          curl --fail --retry 10 --retry-delay 5 "http://$IP" -o /tmp/frontend.html
+          ASSET=$(grep -oE "/assets/[^\" ]+\.js" /tmp/frontend.html | head -n 1)
+          test -n "$ASSET"
+          curl --fail "http://$IP$ASSET" -o /tmp/frontend.js
+          grep -Fq "KoalaTech University - CD Release 9.3C" /tmp/frontend.js
+
+    if: >-
+      github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name ==
+      github.repository && vars.AZURE_DEPLOYMENT_ENABLED == 'true'

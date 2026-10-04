@@ -1,0 +1,114 @@
+name: 03 - Test Staging
+
+'on':
+  workflow_run:
+    workflows:
+      - 02 - Deploy to Staging
+    types:
+      - completed
+    branches:
+      - main
+
+permissions:
+  contents: read
+  actions: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: 03-staging-test
+  cancel-in-progress: false
+
+jobs:
+  smoke-test:
+    name: Staging Smoke Test
+    runs-on: ubuntu-latest
+
+    if: >-
+      github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name ==
+      github.repository && vars.AZURE_DEPLOYMENT_ENABLED == 'true'
+
+    environment:
+      name: staging
+
+    steps:
+      - name: Download the successful upstream release
+        uses: actions/download-artifact@v4
+        with:
+          name: release-metadata
+          path: release
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Read tested image SHA
+        run: |
+          RELEASE_SHA=$(cat release/sha.txt)
+          [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          echo "RELEASE_SHA=$RELEASE_SHA" >> "$GITHUB_ENV"
+          echo "Tested release: $RELEASE_SHA"
+
+      - name: Login to Azure
+        uses: azure/login@v3
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Get AKS credentials
+        run: |
+          az aks get-credentials \
+            --resource-group ${{ vars.AKS_RESOURCE_GROUP }} \
+            --name ${{ vars.AKS_CLUSTER_NAME }} \
+            --overwrite-existing
+
+      - name: Verify staging uses the tested images
+        run: |
+          for SERVICE in frontend user-service student-service lecturer-service course-service enrollment-service; do
+            IMAGE=$(kubectl get deployment "$SERVICE" -n staging -o jsonpath='{.spec.template.spec.containers[0].image}')
+            test "$IMAGE" = "$ACR_SERVER/koalatech-$SERVICE:$RELEASE_SHA"
+          done
+        env:
+          ACR_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+
+      - name: Wait for staging frontend IP
+        run: |
+          for i in {1..30}; do
+
+            FRONTEND_IP=$(kubectl get service frontend \
+              -n staging \
+              -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+
+            if [ -n "$FRONTEND_IP" ]; then
+              echo "FRONTEND_IP=$FRONTEND_IP" >> "$GITHUB_ENV"
+              exit 0
+            fi
+
+            echo "Waiting for staging frontend IP..."
+
+            sleep 10
+          done
+
+          echo "Unable to find staging frontend IP."
+          exit 1
+
+      - name: Test frontend
+        run: |
+          curl --fail --retry 10 --retry-delay 5 "http://${{ env.FRONTEND_IP }}" -o /tmp/frontend.html
+          grep -q "<div id=\"root\"" /tmp/frontend.html
+          ASSET=$(grep -oE "/assets/[^\" ]+\.js" /tmp/frontend.html | head -n 1)
+          test -n "$ASSET"
+          curl --fail "http://${{ env.FRONTEND_IP }}$ASSET" -o /tmp/frontend.js
+          grep -Fq "KoalaTech University - CD Release 9.3C" /tmp/frontend.js
+
+      - name: Record the promoted commit
+        run: |
+          mkdir -p release
+          printf "%s\n" "$RELEASE_SHA" > release/sha.txt
+
+      - name: Pass tested release to the next workflow
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-metadata
+          path: release/sha.txt
+          if-no-files-found: error
+          retention-days: 7
