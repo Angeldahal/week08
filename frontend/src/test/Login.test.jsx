@@ -40,7 +40,7 @@ describe("Login page", () => {
 
     expect(
       screen.getByText(
-        "KoalaTech University"
+        "KoalaTech University - CD Release 9.3C"
       )
     ).toBeInTheDocument();
 
