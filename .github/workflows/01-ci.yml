@@ -185,6 +185,8 @@ jobs:
         POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
     - name: Create application secret
       run: |
+        AZURE_STORAGE_CONNECTION_STRING=$(az storage account show-connection-string --resource-group "$AKS_RESOURCE_GROUP" --name "$STORAGE_ACCOUNT_NAME" --query connectionString --output tsv)
+        echo "::add-mask::$AZURE_STORAGE_CONNECTION_STRING"
         kubectl create secret generic application-secret \
           --namespace staging \
           --from-literal=POSTGRES_USER="${POSTGRES_USER}" \
@@ -203,7 +205,8 @@ jobs:
         DEFAULT_ADMIN_USERNAME: ${{ secrets.DEFAULT_ADMIN_USERNAME }}
         DEFAULT_ADMIN_EMAIL: ${{ secrets.DEFAULT_ADMIN_EMAIL }}
         DEFAULT_ADMIN_PASSWORD: ${{ secrets.DEFAULT_ADMIN_PASSWORD }}
-        AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
+        AKS_RESOURCE_GROUP: ${{ vars.AKS_RESOURCE_GROUP }}
+        STORAGE_ACCOUNT_NAME: ${{ vars.STORAGE_ACCOUNT_NAME }}
     - name: Render and apply tested release
       env:
         DEPLOY_ENV: staging
@@ -343,6 +346,8 @@ jobs:
         POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
     - name: Create application secret
       run: |
+        AZURE_STORAGE_CONNECTION_STRING=$(az storage account show-connection-string --resource-group "$AKS_RESOURCE_GROUP" --name "$STORAGE_ACCOUNT_NAME" --query connectionString --output tsv)
+        echo "::add-mask::$AZURE_STORAGE_CONNECTION_STRING"
         kubectl create secret generic application-secret \
           --namespace production \
           --from-literal=POSTGRES_USER="${POSTGRES_USER}" \
@@ -361,7 +366,8 @@ jobs:
         DEFAULT_ADMIN_USERNAME: ${{ secrets.DEFAULT_ADMIN_USERNAME }}
         DEFAULT_ADMIN_EMAIL: ${{ secrets.DEFAULT_ADMIN_EMAIL }}
         DEFAULT_ADMIN_PASSWORD: ${{ secrets.DEFAULT_ADMIN_PASSWORD }}
-        AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
+        AKS_RESOURCE_GROUP: ${{ vars.AKS_RESOURCE_GROUP }}
+        STORAGE_ACCOUNT_NAME: ${{ vars.STORAGE_ACCOUNT_NAME }}
     - name: Render and apply tested release
       env:
         DEPLOY_ENV: production
