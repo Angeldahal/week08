@@ -1,166 +1,433 @@
-name: 01 - CI
-
-on:
-  # Trigger the workflow on push to main branch
+name: KoalaTech CI and Continuous Deployment
+'on':
+  pull_request:
+    branches:
+    - main
   push:
     branches:
-      - main
-  
-  # Manual trigger for the workflow
-  workflow_dispatch:
-
-
+    - main
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+concurrency:
+  group: koalatech-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
-
-  # =========================================================
-  # Backend Tests
-  # =========================================================
   backend-test:
     name: Test ${{ matrix.service }}
     runs-on: ubuntu-latest
-
     strategy:
       fail-fast: false
-
       matrix:
         include:
-          - service: user-service
-            database: users
-            port: 5433
-
-          - service: student-service
-            database: students
-            port: 5434
-
-          - service: lecturer-service
-            database: lecturers
-            port: 5435
-
-          - service: course-service
-            database: courses
-            port: 5436
-
-          - service: enrollment-service
-            database: enrollments
-            port: 5437
-
+        - service: user-service
+          database: users
+          port: 5433
+        - service: student-service
+          database: students
+          port: 5434
+        - service: lecturer-service
+          database: lecturers
+          port: 5435
+        - service: course-service
+          database: courses
+          port: 5436
+        - service: enrollment-service
+          database: enrollments
+          port: 5437
     services:
       postgres:
         image: postgres:16
-
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: ${{ matrix.database }}
-
         ports:
-          - ${{ matrix.port }}:5432
-
-        options: >-
-          --health-cmd="pg_isready -U postgres -d ${{ matrix.database }}"
-          --health-interval=5s
-          --health-timeout=5s
+        - ${{ matrix.port }}:5432
+        options: --health-cmd="pg_isready -U postgres -d ${{ matrix.database }}" --health-interval=5s --health-timeout=5s
           --health-retries=10
-
     env:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: ${{ matrix.database }}
       POSTGRES_HOST: localhost
       POSTGRES_PORT: ${{ matrix.port }}
-
-      JWT_SECRET_KEY: koalatech-ci-test-secret
+      JWT_SECRET_KEY: koalatech-ci-test-secret-at-least-32-bytes
       JWT_ALGORITHM: HS256
       ACCESS_TOKEN_EXPIRE_MINUTES: 30
-
       DEFAULT_ADMIN_USERNAME: admin
       DEFAULT_ADMIN_EMAIL: admin@koalatech.edu.au
       DEFAULT_ADMIN_PASSWORD: AdminPassword123!
-
-      AZURE_STORAGE_CONNECTION_STRING: ""
-      AZURE_STORAGE_CONTAINER_NAME: ""
-
+      AZURE_STORAGE_CONNECTION_STRING: ''
+      AZURE_STORAGE_CONTAINER_NAME: ''
     steps:
-
-      - name: Checkout repository
-        uses: actions/checkout@v5
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
-        working-directory: ${{ matrix.service }}
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Run tests
-        working-directory: ${{ matrix.service }}
-        run: |
-          pytest -v
-
-
-  # =========================================================
-  # Build and Push Docker Images
-  # =========================================================
+    - name: Checkout repository
+      uses: actions/checkout@v5
+    - name: Isolate CI test configuration
+      working-directory: ${{ matrix.service }}
+      run: |
+        rm -f .env .env.test
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: '3.12'
+    - name: Install dependencies
+      working-directory: ${{ matrix.service }}
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    - name: Run tests
+      working-directory: ${{ matrix.service }}
+      run: |
+        pytest -v
   build-and-push:
     name: Build and Push ${{ matrix.image }}
     runs-on: ubuntu-latest
-
-    # All backend tests must pass before this job starts
     needs:
-      - backend-test
-
-    # Build and push when code is pushed to main or manually triggered
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-
+    - backend-test
+    - frontend-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.AZURE_DEPLOYMENT_ENABLED == 'true'
     strategy:
       fail-fast: false
-
       matrix:
         include:
-          - service: frontend
-            image: koalatech-frontend
-
-          - service: user-service
-            image: koalatech-user-service
-
-          - service: student-service
-            image: koalatech-student-service
-
-          - service: lecturer-service
-            image: koalatech-lecturer-service
-
-          - service: course-service
-            image: koalatech-course-service
-
-          - service: enrollment-service
-            image: koalatech-enrollment-service
-
+        - service: frontend
+          image: koalatech-frontend
+        - service: user-service
+          image: koalatech-user-service
+        - service: student-service
+          image: koalatech-student-service
+        - service: lecturer-service
+          image: koalatech-lecturer-service
+        - service: course-service
+          image: koalatech-course-service
+        - service: enrollment-service
+          image: koalatech-enrollment-service
     steps:
+    - name: Checkout repository
+      uses: actions/checkout@v5
+    - name: Login to Azure
+      uses: azure/login@v3
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+    - name: Login to Azure Container Registry
+      run: |
+        az acr login --name ${{ vars.ACR_NAME }}
+    - name: Build Docker image
+      run: |
+        docker build \
+          --platform linux/amd64 \
+          -t ${{ vars.ACR_LOGIN_SERVER }}/${{ matrix.image }}:${{ github.sha }} \
+          ./${{ matrix.service }}
+    - name: Push Docker image with commit SHA
+      run: |
+        docker push \
+          ${{ vars.ACR_LOGIN_SERVER }}/${{ matrix.image }}:${{ github.sha }}
+  frontend-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+    - uses: actions/checkout@v5
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+        cache: npm
+        cache-dependency-path: frontend/package-lock.json
+    - run: npm ci
+    - run: npm run test:run
+    - run: npm run build
+    env:
+      VITE_USER_SERVICE_URL: /api/users
+      VITE_STUDENT_SERVICE_URL: /api/students
+      VITE_LECTURER_SERVICE_URL: /api/lecturers
+      VITE_COURSE_SERVICE_URL: /api/courses
+      VITE_ENROLLMENT_SERVICE_URL: /api/enrollments
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.AZURE_DEPLOYMENT_ENABLED == 'true'
+    environment:
+      name: staging
+    steps:
+    - name: Checkout tested commit
+      uses: actions/checkout@v5
+      with:
+        ref: ${{ github.sha }}
+    - name: Login to Azure
+      uses: azure/login@v3
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+    - name: Get AKS credentials
+      run: |
+        az aks get-credentials \
+          --resource-group ${{ vars.AKS_RESOURCE_GROUP }} \
+          --name ${{ vars.AKS_CLUSTER_NAME }} \
+          --overwrite-existing
+    - name: Create staging namespace
+      run: |
+        kubectl create namespace staging \
+          --dry-run=client \
+          -o yaml | kubectl apply -f -
+    - name: Create PostgreSQL secret
+      run: |
+        kubectl create secret generic postgres-secret \
+          --namespace staging \
+          --from-literal=POSTGRES_USER="${POSTGRES_USER}" \
+          --from-literal=POSTGRES_PASSWORD="${POSTGRES_PASSWORD}" \
+          --dry-run=client \
+          -o yaml | kubectl apply -f -
+      env:
+        POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+        POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+    - name: Create application secret
+      run: |
+        kubectl create secret generic application-secret \
+          --namespace staging \
+          --from-literal=POSTGRES_USER="${POSTGRES_USER}" \
+          --from-literal=POSTGRES_PASSWORD="${POSTGRES_PASSWORD}" \
+          --from-literal=JWT_SECRET_KEY="${JWT_SECRET_KEY}" \
+          --from-literal=DEFAULT_ADMIN_USERNAME="${DEFAULT_ADMIN_USERNAME}" \
+          --from-literal=DEFAULT_ADMIN_EMAIL="${DEFAULT_ADMIN_EMAIL}" \
+          --from-literal=DEFAULT_ADMIN_PASSWORD="${DEFAULT_ADMIN_PASSWORD}" \
+          --from-literal=AZURE_STORAGE_CONNECTION_STRING="${AZURE_STORAGE_CONNECTION_STRING}" \
+          --dry-run=client \
+          -o yaml | kubectl apply -f -
+      env:
+        POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+        POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+        JWT_SECRET_KEY: ${{ secrets.JWT_SECRET_KEY }}
+        DEFAULT_ADMIN_USERNAME: ${{ secrets.DEFAULT_ADMIN_USERNAME }}
+        DEFAULT_ADMIN_EMAIL: ${{ secrets.DEFAULT_ADMIN_EMAIL }}
+        DEFAULT_ADMIN_PASSWORD: ${{ secrets.DEFAULT_ADMIN_PASSWORD }}
+        AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
+    - name: Render and apply tested release
+      env:
+        DEPLOY_ENV: staging
+        ACR_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+        RELEASE_SHA: ${{ github.sha }}
+      run: |
+        python - <<'PY'
+        import os, pathlib, re
+        source = pathlib.Path('kubernetes') / os.environ['DEPLOY_ENV']
+        target = pathlib.Path('/tmp/rendered-manifests')
+        target.mkdir(exist_ok=True)
+        for path in source.glob('*.yaml'):
+            content = path.read_text()
+            if 'image: placeholder' in content:
+                service = re.search(r'^  name: (.+)$', content, re.M).group(1).strip()
+                content = content.replace('image: placeholder', 'image: ' + os.environ['ACR_SERVER'] + '/koalatech-' + service + ':' + os.environ['RELEASE_SHA'])
+            (target / path.name).write_text(content)
+        PY
+        kubectl apply -f /tmp/rendered-manifests/
+    - name: Wait for frontend rollout
+      run: |
+        kubectl rollout status deployment/frontend \
+          -n staging \
+          --timeout=300s
+    - name: Wait for user-service rollout
+      run: |
+        kubectl rollout status deployment/user-service \
+          -n staging \
+          --timeout=300s
+    - name: Wait for student-service rollout
+      run: |
+        kubectl rollout status deployment/student-service \
+          -n staging \
+          --timeout=300s
+    - name: Wait for lecturer-service rollout
+      run: |
+        kubectl rollout status deployment/lecturer-service \
+          -n staging \
+          --timeout=300s
+    - name: Wait for course-service rollout
+      run: |
+        kubectl rollout status deployment/course-service \
+          -n staging \
+          --timeout=300s
+    - name: Wait for enrollment-service rollout
+      run: |
+        kubectl rollout status deployment/enrollment-service \
+          -n staging \
+          --timeout=300s
+    - name: Show staging resources
+      run: |
+        kubectl get pods -n staging
+        kubectl get services -n staging
+        kubectl get pvc -n staging
+    needs: build-and-push
+  smoke-test:
+    name: Staging Smoke Test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.AZURE_DEPLOYMENT_ENABLED == 'true'
+    environment:
+      name: staging
+    steps:
+    - name: Login to Azure
+      uses: azure/login@v3
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+    - name: Get AKS credentials
+      run: |
+        az aks get-credentials \
+          --resource-group ${{ vars.AKS_RESOURCE_GROUP }} \
+          --name ${{ vars.AKS_CLUSTER_NAME }} \
+          --overwrite-existing
+    - name: Wait for staging frontend IP
+      run: |
+        for i in {1..30}; do
 
-      - name: Checkout repository
-        uses: actions/checkout@v5
+          FRONTEND_IP=$(kubectl get service frontend \
+            -n staging \
+            -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
 
-      - name: Login to Azure
-        uses: azure/login@v3
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          if [ -n "$FRONTEND_IP" ]; then
+            echo "FRONTEND_IP=$FRONTEND_IP" >> "$GITHUB_ENV"
+            exit 0
+          fi
 
-      - name: Login to Azure Container Registry
-        run: |
-          az acr login --name ${{ vars.ACR_NAME }}
+          echo "Waiting for staging frontend IP..."
 
-      - name: Build Docker image
-        run: |
-          docker build \
-            --platform linux/amd64 \
-            -t ${{ vars.ACR_LOGIN_SERVER }}/${{ matrix.image }}:${{ github.sha }} \
-            ./${{ matrix.service }}
+          sleep 10
+        done
 
-      - name: Push Docker image with commit SHA
-        run: |
-          docker push \
-            ${{ vars.ACR_LOGIN_SERVER }}/${{ matrix.image }}:${{ github.sha }}
+        echo "Unable to find staging frontend IP."
+        exit 1
+    - name: Test frontend
+      run: |
+        curl --fail --retry 10 --retry-delay 5 "http://${{ env.FRONTEND_IP }}" -o /tmp/frontend.html
+        grep -q "<div id=\"root\"" /tmp/frontend.html
+        ASSET=$(grep -oE "/assets/[^\" ]+\.js" /tmp/frontend.html | head -n 1)
+        test -n "$ASSET"
+        curl --fail "http://${{ env.FRONTEND_IP }}$ASSET" -o /tmp/frontend.js
+        grep -Fq "KoalaTech University - CD Release 9.3C" /tmp/frontend.js
+    needs: deploy-staging
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v5
+      with:
+        ref: ${{ github.sha }}
+    - name: Login to Azure
+      uses: azure/login@v3
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+    - name: Get AKS credentials
+      run: |
+        az aks get-credentials \
+          --resource-group ${{ vars.AKS_RESOURCE_GROUP }} \
+          --name ${{ vars.AKS_CLUSTER_NAME }} \
+          --overwrite-existing
+    - name: Create production namespace
+      run: |
+        kubectl create namespace production \
+          --dry-run=client \
+          -o yaml | kubectl apply -f -
+    - name: Create PostgreSQL secret
+      run: |
+        kubectl create secret generic postgres-secret \
+          --namespace production \
+          --from-literal=POSTGRES_USER="${POSTGRES_USER}" \
+          --from-literal=POSTGRES_PASSWORD="${POSTGRES_PASSWORD}" \
+          --dry-run=client \
+          -o yaml | kubectl apply -f -
+      env:
+        POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+        POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+    - name: Create application secret
+      run: |
+        kubectl create secret generic application-secret \
+          --namespace production \
+          --from-literal=POSTGRES_USER="${POSTGRES_USER}" \
+          --from-literal=POSTGRES_PASSWORD="${POSTGRES_PASSWORD}" \
+          --from-literal=JWT_SECRET_KEY="${JWT_SECRET_KEY}" \
+          --from-literal=DEFAULT_ADMIN_USERNAME="${DEFAULT_ADMIN_USERNAME}" \
+          --from-literal=DEFAULT_ADMIN_EMAIL="${DEFAULT_ADMIN_EMAIL}" \
+          --from-literal=DEFAULT_ADMIN_PASSWORD="${DEFAULT_ADMIN_PASSWORD}" \
+          --from-literal=AZURE_STORAGE_CONNECTION_STRING="${AZURE_STORAGE_CONNECTION_STRING}" \
+          --dry-run=client \
+          -o yaml | kubectl apply -f -
+      env:
+        POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+        POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+        JWT_SECRET_KEY: ${{ secrets.JWT_SECRET_KEY }}
+        DEFAULT_ADMIN_USERNAME: ${{ secrets.DEFAULT_ADMIN_USERNAME }}
+        DEFAULT_ADMIN_EMAIL: ${{ secrets.DEFAULT_ADMIN_EMAIL }}
+        DEFAULT_ADMIN_PASSWORD: ${{ secrets.DEFAULT_ADMIN_PASSWORD }}
+        AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
+    - name: Render and apply tested release
+      env:
+        DEPLOY_ENV: production
+        ACR_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+        RELEASE_SHA: ${{ github.sha }}
+      run: |
+        python - <<'PY'
+        import os, pathlib, re
+        source = pathlib.Path('kubernetes') / os.environ['DEPLOY_ENV']
+        target = pathlib.Path('/tmp/rendered-manifests')
+        target.mkdir(exist_ok=True)
+        for path in source.glob('*.yaml'):
+            content = path.read_text()
+            if 'image: placeholder' in content:
+                service = re.search(r'^  name: (.+)$', content, re.M).group(1).strip()
+                content = content.replace('image: placeholder', 'image: ' + os.environ['ACR_SERVER'] + '/koalatech-' + service + ':' + os.environ['RELEASE_SHA'])
+            (target / path.name).write_text(content)
+        PY
+        kubectl apply -f /tmp/rendered-manifests/
+    - name: Wait for frontend rollout
+      run: |
+        kubectl rollout status deployment/frontend \
+          -n production \
+          --timeout=300s
+    - name: Wait for user-service rollout
+      run: |
+        kubectl rollout status deployment/user-service \
+          -n production \
+          --timeout=300s
+    - name: Wait for student-service rollout
+      run: |
+        kubectl rollout status deployment/student-service \
+          -n production \
+          --timeout=300s
+    - name: Wait for lecturer-service rollout
+      run: |
+        kubectl rollout status deployment/lecturer-service \
+          -n production \
+          --timeout=300s
+    - name: Wait for course-service rollout
+      run: |
+        kubectl rollout status deployment/course-service \
+          -n production \
+          --timeout=300s
+    - name: Wait for enrollment-service rollout
+      run: |
+        kubectl rollout status deployment/enrollment-service \
+          -n production \
+          --timeout=300s
+    - name: Show production resources
+      run: |
+        kubectl get pods -n production
+        kubectl get services -n production
+        kubectl get pvc -n production
+    - name: Verify production release
+      run: |
+        for i in {1..30}; do
+          IP=$(kubectl get service frontend -n production -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          if [ -n "$IP" ]; then break; fi
+          sleep 10
+        done
+        test -n "$IP"
+        curl --fail --retry 10 --retry-delay 5 "http://$IP" -o /tmp/frontend.html
+        ASSET=$(grep -oE "/assets/[^\" ]+\.js" /tmp/frontend.html | head -n 1)
+        test -n "$ASSET"
+        curl --fail "http://$IP$ASSET" -o /tmp/frontend.js
+        grep -Fq "KoalaTech University - CD Release 9.3C" /tmp/frontend.js
+    needs: smoke-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.AZURE_DEPLOYMENT_ENABLED == 'true'

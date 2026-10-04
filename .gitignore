@@ -202,3 +202,11 @@ terraform/.terraform/
 terraform/.terraform.lock.hcl
 terraform/terraform.tfstate
 
+
+terraform/*.tfplan
+
+terraform/tfplan
+
+terraform/*.tfstate.backup
+
+frontend/dist/

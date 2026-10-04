@@ -30,7 +30,7 @@ variable "storage_account_name" {
       can(regex("^[a-z0-9]+$", var.storage_account_name))
     )
 
-    error_message = "The storage account name must contain 3–24 lowercase letters and numbers."
+    error_message = "The storage account name must contain 3â€“24 lowercase letters and numbers."
   }
 }
 
@@ -45,7 +45,7 @@ variable "aks_dns_prefix" {
 }
 
 variable "aks_node_count" {
-  description = "Number of nodes in the default AKS node pool"
+  description = "Total number of AKS nodes across the system and application pools"
   type        = number
   default     = 3
 
@@ -56,9 +56,9 @@ variable "aks_node_count" {
 }
 
 variable "aks_node_vm_size" {
-  description = "Virtual machine size used by the AKS nodes"
+  description = "Virtual machine size used by the application node pool"
   type        = string
-  default     = "Standard_D2s_v3"
+  default     = "Standard_D2als_v6"
 }
 
 variable "environment" {
@@ -80,4 +80,16 @@ variable "tags" {
     ManagedBy = "Terraform"
     Practical = "Week08"
   }
+}
+
+variable "aks_system_node_count" {
+  description = "Number of system nodes; AKS requires at least two"
+  type        = number
+  default     = 2
+}
+
+variable "aks_system_node_vm_size" {
+  description = "System pool VM size with at least four vCPUs"
+  type        = string
+  default     = "Standard_D4als_v6"
 }
