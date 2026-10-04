@@ -5,7 +5,7 @@ resource_group_name = "koalatech-week08-rg"
 acr_name = "sit722terraformacr09"
 
 # Replace with a unique name for your Azure Storage Account
-storage_account_name = "sit722angalstorageacc09"
+storage_account_name = "sit722task93cangal1004"
 
 # Replace with a unique name for your Azure Kubernetes Service cluster
 aks_cluster_name = "sit722akscluster09"
